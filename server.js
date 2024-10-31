@@ -1,6 +1,27 @@
 const express = require('express');
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
+const jwt = require('jsonwebtoken');
+require('dotenv').config();
 const app = express();
+
+// Configuration sécurisée avec variables d'environnement
+const TWILIO_CONFIG = {
+    accountSid: process.env.TWILIO_ACCOUNT_SID,
+    apiKeySid: process.env.TWILIO_API_KEY_SID,
+    apiKeySecret: process.env.TWILIO_API_KEY_SECRET,
+    twimlAppSid: process.env.TWILIO_APP_SID,
+    twilioNumber: process.env.TWILIO_PHONE_NUMBER
+};
+
+// Vérification de la configuration
+console.log('Vérification de la configuration Twilio...');
+Object.entries(TWILIO_CONFIG).forEach(([key, value]) => {
+    if (!value) {
+        console.error(`❌ ${key} manquant dans les variables d'environnement`);
+        process.exit(1);
+    }
+});
+console.log('✓ Configuration validée');
 
 // Fonction utilitaire pour formater les numéros de téléphone
 function formatPhoneNumber(number) {
@@ -23,14 +44,12 @@ function diagnose403Error(req) {
         problems: []
     };
 
-    // Vérification des en-têtes
     console.log('1. Vérification des en-têtes:');
     if (!req.headers['x-twilio-signature']) {
         diagnostics.problems.push('Signature Twilio manquante');
         console.log('❌ Signature Twilio manquante');
     }
 
-    // Vérification des numéros
     console.log('\n2. Vérification des numéros:');
     const fromNumber = req.body?.From;
     const toNumber = req.body?.To;
@@ -52,7 +71,9 @@ function diagnose403Error(req) {
     return diagnostics;
 }
 
-// Configuration CORS améliorée
+// Middleware pour CORS et parsing
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -64,9 +85,6 @@ app.use((req, res, next) => {
     }
     next();
 });
-
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
 
 // Middleware pour le diagnostic des erreurs 403
 app.use((req, res, next) => {
@@ -82,52 +100,63 @@ app.use((req, res, next) => {
     next();
 });
 
-// Route racine
+// Route de test
 app.get('/', (req, res) => {
     console.log('GET / appelé');
     res.send('Twilio Voice Server - Status: Running');
 });
 
-// Route GET pour validation Twilio
-app.get('/voice', (req, res) => {
-    console.log('=== GET /voice appelé ===');
-    console.log('Headers:', req.headers);
-    
-    const twiml = new VoiceResponse();
-    twiml.say({
-        language: 'fr-FR',
-        voice: 'woman'
-    }, 'Service vocal Twilio actif');
-    
-    console.log('TwiML généré (GET):', twiml.toString());
-    res.type('text/xml');
-    res.send(twiml.toString());
+// Route pour générer le token
+app.post('/token', async (req, res) => {
+    console.log('=== Génération de token demandée ===');
+    try {
+        const grant = {
+            voice: {
+                incoming: { allow: true },
+                outgoing: {
+                    application_sid: TWILIO_CONFIG.twimlAppSid,
+                    allow: true
+                }
+            },
+            identity: `user_${Date.now()}`
+        };
+
+        const token = jwt.sign(
+            {
+                grants: grant,
+                sub: TWILIO_CONFIG.accountSid,
+                iss: TWILIO_CONFIG.apiKeySid,
+                exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+                jti: `${TWILIO_CONFIG.apiKeySid}-${Date.now()}`
+            },
+            TWILIO_CONFIG.apiKeySecret,
+            { algorithm: 'HS256' }
+        );
+
+        console.log('✓ Token généré');
+        res.json({ token });
+    } catch (error) {
+        console.error('❌ Erreur:', error);
+        res.status(500).json({ error: 'Erreur de génération du token' });
+    }
 });
 
-// Route principale pour les appels
+// Route pour les appels
 app.post('/voice', (req, res) => {
-    console.log('=== POST /voice appelé ===');
+    console.log('=== Nouvel appel ===');
     console.log('Headers:', req.headers);
     console.log('Body:', req.body);
-    
-    // Vérification préliminaire pour diagnostic 403
-    if (!req.headers['x-twilio-signature']) {
-        console.warn('⚠️ Requête sans signature Twilio');
-        diagnose403Error(req);
-    }
     
     const twiml = new VoiceResponse();
     
     try {
         const toNumber = formatPhoneNumber(req.body.To);
-        const fromNumber = '+32460205680';
+        const fromNumber = TWILIO_CONFIG.twilioNumber;
         
-        console.log('Tentative d\'appel:');
-        console.log('- De:', fromNumber);
-        console.log('- Vers:', toNumber);
+        console.log('Appel de', fromNumber, 'vers', toNumber);
         
         if (!toNumber) {
-            throw new Error('Numéro de destination manquant ou invalide');
+            throw new Error('Numéro invalide');
         }
         
         const dial = twiml.dial({
@@ -144,46 +173,36 @@ app.post('/voice', (req, res) => {
         }, toNumber);
         
         const generatedTwiML = twiml.toString();
-        console.log('TwiML généré (POST):', generatedTwiML);
+        console.log('TwiML généré:', generatedTwiML);
         
         res.type('text/xml');
         res.send(generatedTwiML);
         
     } catch (error) {
-        console.error('Erreur lors du traitement de l\'appel:', error);
+        console.error('❌ Erreur:', error);
         diagnose403Error(req);
         
         const errorResponse = new VoiceResponse();
         errorResponse.say({
             language: 'fr-FR',
             voice: 'woman'
-        }, 'Une erreur est survenue lors de l\'appel. Veuillez réessayer.');
+        }, 'Une erreur est survenue');
         
         res.type('text/xml');
         res.send(errorResponse.toString());
     }
 });
 
-// Route pour les callbacks de statut
+// Route pour les statuts
 app.post('/status', (req, res) => {
-    console.log('=== Mise à jour du statut d\'appel ===');
+    console.log('=== Mise à jour statut ===');
     console.log('CallSid:', req.body.CallSid);
-    console.log('CallStatus:', req.body.CallStatus);
-    console.log('From:', req.body.From);
-    console.log('To:', req.body.To);
+    console.log('Status:', req.body.CallStatus);
+    console.log('De:', req.body.From);
+    console.log('Vers:', req.body.To);
     console.log('Duration:', req.body.CallDuration);
     
     res.sendStatus(200);
-});
-
-// Gestion des erreurs globale
-app.use((err, req, res, next) => {
-    console.error('Erreur serveur:', err);
-    diagnose403Error(req);
-    res.status(500).json({
-        error: 'Erreur serveur',
-        message: err.message
-    });
 });
 
 // Démarrage du serveur
@@ -192,10 +211,8 @@ app.listen(port, () => {
     console.log('\n=== Serveur Twilio Voice démarré ===');
     console.log(`Port: ${port}`);
     console.log(`URL externe: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`}`);
-    console.log('\nRoutes disponibles:');
-    console.log('- GET  / -> Vérification du statut');
-    console.log('- GET  /voice -> Validation Twilio');
-    console.log('- POST /voice -> Gestion des appels');
-    console.log('- POST /status -> Callbacks de statut');
-    console.log('\nNuméro Twilio configuré:', '+32460205680');
+    console.log('\nConfiguration:');
+    console.log('- Account SID:', TWILIO_CONFIG.accountSid.slice(0, 6) + '...');
+    console.log('- API Key SID:', TWILIO_CONFIG.apiKeySid.slice(0, 6) + '...');
+    console.log('- Numéro Twilio:', TWILIO_CONFIG.twilioNumber);
 });
