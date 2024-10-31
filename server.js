@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const app = express();
 
-// Configuration avec logs détaillés
+// Configuration sécurisée avec variables d'environnement
 const TWILIO_CONFIG = {
     accountSid: process.env.TWILIO_ACCOUNT_SID,
     apiKeySid: process.env.TWILIO_API_KEY_SID,
@@ -15,23 +15,37 @@ const TWILIO_CONFIG = {
 
 // Vérification détaillée de la configuration
 console.log('\n=== VÉRIFICATION DE LA CONFIGURATION TWILIO ===');
+console.log('Timestamp:', new Date().toISOString());
 Object.entries(TWILIO_CONFIG).forEach(([key, value]) => {
     if (!value) {
         console.error(`❌ ${key} manquant dans les variables d'environnement`);
         process.exit(1);
     }
     console.log(`✓ ${key}: ${key.includes('Secret') ? '****' : value.slice(0, 6) + '...'}`);
+    // Vérification supplémentaire des formats
+    if (key === 'accountSid' && !value.startsWith('AC')) {
+        console.warn('⚠️ Account SID devrait commencer par AC');
+    }
+    if (key === 'apiKeySid' && !value.startsWith('SK')) {
+        console.warn('⚠️ API Key SID devrait commencer par SK');
+    }
+    if (key === 'twimlAppSid' && !value.startsWith('AP')) {
+        console.warn('⚠️ TwiML App SID devrait commencer par AP');
+    }
 });
 console.log('✓ Configuration validée\n');
 
-// Middleware avec logs
+// Middleware avec logs détaillés
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use((req, res, next) => {
     console.log('\n=== NOUVELLE REQUÊTE ===');
+    console.log('Timestamp:', new Date().toISOString());
     console.log('URL:', req.url);
     console.log('Méthode:', req.method);
     console.log('Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    console.log('Query:', JSON.stringify(req.query, null, 2));
     
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -45,8 +59,9 @@ app.use((req, res, next) => {
     next();
 });
 
+// Fonction utilitaire pour formater les numéros de téléphone avec validation
 function formatPhoneNumber(number) {
-    console.log('=== Formatage du numéro ===');
+    console.log('\n=== FORMATAGE DU NUMÉRO ===');
     console.log('Numéro d\'entrée:', number);
     
     if (!number) {
@@ -54,41 +69,65 @@ function formatPhoneNumber(number) {
         return null;
     }
     
+    // Nettoyage plus strict du numéro
     let formatted = number.replace(/[^\d+]/g, '');
     if (!formatted.startsWith('+')) {
         formatted = '+' + formatted;
+    }
+    
+    // Validation supplémentaire
+    if (formatted.length < 10) {
+        console.log('❌ Numéro trop court');
+        return null;
     }
     
     console.log('Numéro formaté:', formatted);
     return formatted;
 }
 
+// Route de test avec diagnostics
 app.get('/', (req, res) => {
     console.log('\n=== GET / appelé ===');
+    console.log('Timestamp:', new Date().toISOString());
+    console.log('Status serveur: OK');
     res.send('Twilio Voice Server - Status: Running');
 });
 
+// Route pour générer le token avec diagnostics complets
 app.post('/token', async (req, res) => {
     console.log('\n=== GÉNÉRATION DE TOKEN DEMANDÉE ===');
-    console.log('Body de la requête:', req.body);
+    console.log('Timestamp:', new Date().toISOString());
+    console.log('Body de la requête:', JSON.stringify(req.body, null, 2));
     
     try {
+        // Récupération et validation du numéro de destination
+        const toNumber = req.body.to ? formatPhoneNumber(req.body.to) : null;
+        console.log('Numéro de destination formaté:', toNumber);
+
         // Log détaillé de la configuration utilisée
         console.log('Configuration utilisée:');
         console.log('- TwiML App SID:', TWILIO_CONFIG.twimlAppSid);
         console.log('- Account SID:', TWILIO_CONFIG.accountSid);
         console.log('- API Key SID:', TWILIO_CONFIG.apiKeySid);
         console.log('- API Key Secret présent:', !!TWILIO_CONFIG.apiKeySecret);
-        
+        console.log('- Numéro Twilio:', TWILIO_CONFIG.twilioNumber);
+
+        // Construction du grant avec paramètres complets
         const grant = {
             voice: {
-                incoming: { allow: true },
+                incoming: { 
+                    allow: true 
+                },
                 outgoing: {
                     application_sid: TWILIO_CONFIG.twimlAppSid,
                     allow: true,
                     params: {
-                        // Ajout des paramètres explicites pour le débogage
-                        CallerId: TWILIO_CONFIG.twilioNumber
+                        CallerId: TWILIO_CONFIG.twilioNumber,
+                        To: toNumber,
+                        From: TWILIO_CONFIG.twilioNumber,
+                        // Paramètres supplémentaires pour le debugging
+                        ApplicationSid: TWILIO_CONFIG.twimlAppSid,
+                        AccountSid: TWILIO_CONFIG.accountSid
                     }
                 }
             },
@@ -97,21 +136,37 @@ app.post('/token', async (req, res) => {
         
         console.log('Grant généré:', JSON.stringify(grant, null, 2));
 
+        // Construction du payload complet
         const tokenPayload = {
             grants: grant,
             sub: TWILIO_CONFIG.accountSid,
             iss: TWILIO_CONFIG.apiKeySid,
             exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
-            jti: `${TWILIO_CONFIG.apiKeySid}-${Date.now()}`
+            jti: `${TWILIO_CONFIG.apiKeySid}-${Date.now()}`,
+            // Métadonnées supplémentaires pour le debugging
+            iat: Math.floor(Date.now() / 1000),
+            nbf: Math.floor(Date.now() / 1000)
         };
         
         console.log('Payload du token:', JSON.stringify(tokenPayload, null, 2));
 
+        // Génération du token avec vérifications
         const token = jwt.sign(
             tokenPayload,
             TWILIO_CONFIG.apiKeySecret,
-            { algorithm: 'HS256' }
+            { 
+                algorithm: 'HS256',
+                header: {
+                    typ: 'JWT',
+                    alg: 'HS256'
+                }
+            }
         );
+
+        // Vérification du token généré
+        const decodedToken = jwt.decode(token, { complete: true });
+        console.log('Token décodé (header):', JSON.stringify(decodedToken.header, null, 2));
+        console.log('Token décodé (payload):', JSON.stringify(decodedToken.payload, null, 2));
 
         console.log('✓ Token généré avec succès');
         console.log('Longueur du token:', token.length);
@@ -120,21 +175,27 @@ app.post('/token', async (req, res) => {
         res.json({ token });
     } catch (error) {
         console.error('\n❌ ERREUR DE GÉNÉRATION DU TOKEN:');
+        console.error('Timestamp:', new Date().toISOString());
         console.error('Message:', error.message);
         console.error('Stack:', error.stack);
         console.error('Code:', error.code);
+        console.error('Détails complets:', error);
+        
         res.status(500).json({ 
             error: 'Erreur de génération du token',
             details: error.message,
-            code: error.code
+            code: error.code,
+            timestamp: new Date().toISOString()
         });
     }
 });
 
+// Routes Voice avec diagnostics complets
 app.get('/voice', (req, res) => {
     console.log('\n=== GET VOICE APPELÉ ===');
-    console.log('Headers:', req.headers);
-    console.log('Query:', req.query);
+    console.log('Timestamp:', new Date().toISOString());
+    console.log('Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('Query:', JSON.stringify(req.query, null, 2));
     
     const twiml = new VoiceResponse();
     
@@ -150,13 +211,16 @@ app.get('/voice', (req, res) => {
         res.type('text/xml');
         res.send(generatedTwiML);
     } catch (error) {
-        console.error('❌ Erreur GET /voice:', error);
+        console.error('\n❌ ERREUR GET /voice:');
+        console.error('Message:', error.message);
+        console.error('Stack:', error.stack);
         res.status(500).send('Erreur serveur');
     }
 });
 
 app.post('/voice', (req, res) => {
     console.log('\n=== POST VOICE APPELÉ ===');
+    console.log('Timestamp:', new Date().toISOString());
     console.log('Headers:', JSON.stringify(req.headers, null, 2));
     console.log('Body:', JSON.stringify(req.body, null, 2));
     
@@ -166,9 +230,10 @@ app.post('/voice', (req, res) => {
         const toNumber = formatPhoneNumber(req.body.To);
         const fromNumber = TWILIO_CONFIG.twilioNumber;
         
-        console.log('Configuration de l\'appel:');
+        console.log('\nConfiguration de l\'appel:');
         console.log('- De:', fromNumber);
         console.log('- Vers:', toNumber);
+        console.log('- TwiML App SID:', TWILIO_CONFIG.twimlAppSid);
         
         if (!toNumber) {
             throw new Error('Numéro invalide');
@@ -178,10 +243,13 @@ app.post('/voice', (req, res) => {
             callerId: fromNumber,
             timeout: 30,
             answerOnBridge: true,
-            record: 'record-from-answer'
+            record: 'record-from-answer',
+            // Paramètres supplémentaires pour le debugging
+            action: `${req.protocol}://${req.get('host')}/voice/action`,
+            method: 'POST'
         };
         
-        console.log('Paramètres Dial:', dialParams);
+        console.log('Paramètres Dial:', JSON.stringify(dialParams, null, 2));
         const dial = twiml.dial(dialParams);
         
         const numberParams = {
@@ -190,17 +258,23 @@ app.post('/voice', (req, res) => {
             statusCallbackMethod: 'POST'
         };
         
-        console.log('Paramètres Number:', numberParams);
+        console.log('Paramètres Number:', JSON.stringify(numberParams, null, 2));
         dial.number(numberParams, toNumber);
         
         const generatedTwiML = twiml.toString();
         console.log('TwiML généré:', generatedTwiML);
+        
+        // Vérification de la validité du TwiML
+        if (!generatedTwiML.includes('<?xml')) {
+            throw new Error('TwiML invalide généré');
+        }
         
         res.type('text/xml');
         res.send(generatedTwiML);
         
     } catch (error) {
         console.error('\n❌ ERREUR POST /voice:');
+        console.error('Timestamp:', new Date().toISOString());
         console.error('Message:', error.message);
         console.error('Stack:', error.stack);
         
@@ -217,8 +291,10 @@ app.post('/voice', (req, res) => {
     }
 });
 
+// Route de status avec diagnostics complets
 app.post('/status', (req, res) => {
     console.log('\n=== MISE À JOUR STATUT ===');
+    console.log('Timestamp:', new Date().toISOString());
     console.log('Headers:', JSON.stringify(req.headers, null, 2));
     console.log('Body complet:', JSON.stringify(req.body, null, 2));
     console.log('Détails:');
@@ -229,10 +305,26 @@ app.post('/status', (req, res) => {
     console.log('- Duration:', req.body.CallDuration);
     console.log('- Direction:', req.body.Direction);
     console.log('- API Version:', req.body.ApiVersion);
+    console.log('- Prix:', req.body.Price);
+    console.log('- Erreurs:', req.body.ErrorCode, req.body.ErrorMessage);
     
     res.sendStatus(200);
 });
 
+// Route de callback d'action pour Dial
+app.post('/voice/action', (req, res) => {
+    console.log('\n=== CALLBACK ACTION DIAL ===');
+    console.log('Timestamp:', new Date().toISOString());
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    
+    const twiml = new VoiceResponse();
+    twiml.hangup();
+    
+    res.type('text/xml');
+    res.send(twiml.toString());
+});
+
+// Démarrage du serveur avec diagnostics complets
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
     console.log('\n=== SERVEUR TWILIO VOICE DÉMARRÉ ===');
@@ -247,5 +339,8 @@ app.listen(port, () => {
             console.log(`- ${key}: ${value ? (value.slice(0, 6) + '...') : 'NON DÉFINI'}`);
         }
     });
-    console.log('\nServer prêt à recevoir des requêtes');
+    
+    // Vérification finale de la configuration
+    console.log('\nVérifications finales:');
+    console.log('- Express configuré:', !!app);
 });
