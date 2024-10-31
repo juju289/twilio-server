@@ -1,14 +1,10 @@
 const express = require('express');
-const twilio = require('twilio');
-const dotenv = require('dotenv');
+const VoiceResponse = require('twilio').twiml.VoiceResponse;
 const jwt = require('jsonwebtoken');
-
-// Charger les variables d'environnement
-dotenv.config();
-
+require('dotenv').config();
 const app = express();
 
-// Configuration Twilio
+// Configuration sécurisée avec variables d'environnement
 const TWILIO_CONFIG = {
     accountSid: process.env.TWILIO_ACCOUNT_SID,
     apiKeySid: process.env.TWILIO_API_KEY_SID,
@@ -17,21 +13,32 @@ const TWILIO_CONFIG = {
     twilioNumber: process.env.TWILIO_PHONE_NUMBER
 };
 
-// Middleware
+// Vérification de la configuration
+console.log('Vérification de la configuration Twilio...');
+Object.entries(TWILIO_CONFIG).forEach(([key, value]) => {
+    if (!value) {
+        console.error(`❌ ${key} manquant dans les variables d'environnement`);
+        process.exit(1);
+    }
+});
+console.log('✓ Configuration validée');
+
+// Middleware pour CORS et parsing
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Twilio-Signature');
     res.header('Access-Control-Allow-Credentials', true);
+    
     if (req.method === 'OPTIONS') {
         return res.sendStatus(200);
     }
     next();
 });
 
-// Formatage des numéros de téléphone
+// Fonction utilitaire pour formater les numéros de téléphone
 function formatPhoneNumber(number) {
     if (!number) return null;
     let formatted = number.replace(/[^\d+]/g, '');
@@ -41,12 +48,15 @@ function formatPhoneNumber(number) {
     return formatted;
 }
 
-// Routes
+// Route de test
 app.get('/', (req, res) => {
+    console.log('GET / appelé');
     res.send('Twilio Voice Server - Status: Running');
 });
 
-app.post('/token', (req, res) => {
+// Route pour générer le token
+app.post('/token', async (req, res) => {
+    console.log('=== Génération de token demandée ===');
     try {
         const grant = {
             voice: {
@@ -71,22 +81,48 @@ app.post('/token', (req, res) => {
             { algorithm: 'HS256' }
         );
 
+        console.log('✓ Token généré');
         res.json({ token });
     } catch (error) {
-        console.error('Error generating token:', error);
-        res.status(500).json({ error: 'Token generation failed' });
+        console.error('❌ Erreur:', error);
+        res.status(500).json({ error: 'Erreur de génération du token' });
+    }
+});
+
+// Route pour les appels (GET et POST)
+app.get('/voice', (req, res) => {
+    console.log('=== GET Voice appelé ===');
+    const twiml = new VoiceResponse();
+    
+    try {
+        twiml.say({
+            language: 'fr-FR',
+            voice: 'woman'
+        }, 'Bienvenue sur le service vocal');
+        
+        res.type('text/xml');
+        res.send(twiml.toString());
+    } catch (error) {
+        console.error('❌ Erreur:', error);
+        res.status(500).send('Erreur serveur');
     }
 });
 
 app.post('/voice', (req, res) => {
-    const twiml = new twilio.twiml.VoiceResponse();
+    console.log('=== POST Voice appelé ===');
+    console.log('Headers:', req.headers);
+    console.log('Body:', req.body);
+    
+    const twiml = new VoiceResponse();
     
     try {
         const toNumber = formatPhoneNumber(req.body.To);
         const fromNumber = TWILIO_CONFIG.twilioNumber;
         
+        console.log('Appel de', fromNumber, 'vers', toNumber);
+        
         if (!toNumber) {
-            throw new Error('Invalid phone number');
+            throw new Error('Numéro invalide');
         }
         
         const dial = twiml.dial({
@@ -102,38 +138,46 @@ app.post('/voice', (req, res) => {
             statusCallbackMethod: 'POST'
         }, toNumber);
         
+        const generatedTwiML = twiml.toString();
+        console.log('TwiML généré:', generatedTwiML);
+        
         res.type('text/xml');
-        res.send(twiml.toString());
+        res.send(generatedTwiML);
+        
     } catch (error) {
-        console.error('Error handling voice call:', error);
-        const errorResponse = new twilio.twiml.VoiceResponse();
+        console.error('❌ Erreur:', error);
+        
+        const errorResponse = new VoiceResponse();
         errorResponse.say({
             language: 'fr-FR',
             voice: 'woman'
         }, 'Une erreur est survenue');
+        
         res.type('text/xml');
         res.send(errorResponse.toString());
     }
 });
 
+// Route pour les statuts
 app.post('/status', (req, res) => {
-    console.log('Call Status Update:', {
-        CallSid: req.body.CallSid,
-        Status: req.body.CallStatus,
-        From: req.body.From,
-        To: req.body.To,
-        Duration: req.body.CallDuration
-    });
+    console.log('=== Mise à jour statut ===');
+    console.log('CallSid:', req.body.CallSid);
+    console.log('Status:', req.body.CallStatus);
+    console.log('De:', req.body.From);
+    console.log('Vers:', req.body.To);
+    console.log('Duration:', req.body.CallDuration);
+    
     res.sendStatus(200);
 });
 
 // Démarrage du serveur
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-    console.log('Twilio Configuration:', {
-        accountSid: TWILIO_CONFIG.accountSid?.slice(0, 6) + '...',
-        apiKeySid: TWILIO_CONFIG.apiKeySid?.slice(0, 6) + '...',
-        twilioNumber: TWILIO_CONFIG.twilioNumber
-    });
+    console.log('\n=== Serveur Twilio Voice démarré ===');
+    console.log(`Port: ${port}`);
+    console.log(`URL externe: ${process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`}`);
+    console.log('\nConfiguration:');
+    console.log('- Account SID:', TWILIO_CONFIG.accountSid.slice(0, 6) + '...');
+    console.log('- API Key SID:', TWILIO_CONFIG.apiKeySid.slice(0, 6) + '...');
+    console.log('- Numéro Twilio:', TWILIO_CONFIG.twilioNumber);
 });
